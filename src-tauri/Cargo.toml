@@ -1,0 +1,31 @@
+[package]
+name = "my_ai_local_model"
+version = "0.1.0"
+description = "Local AI model advisor and Hugging Face downloader"
+authors = ["Jeff Barnes"]
+edition = "2021"
+
+[lib]
+name = "my_ai_local_model_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util"] }
+sysinfo = "0.33"
+dirs = "5"
+regex = "1"
+futures-util = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+wmi = "0.15"
+windows = { version = "0.58", features = ["Win32_System_Com", "Win32_System_Ole"] }
