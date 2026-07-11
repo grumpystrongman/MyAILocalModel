@@ -14,6 +14,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - name: Install frontend dependencies
         run: npm install
@@ -21,5 +22,14 @@ jobs:
         run: npm run typecheck
       - name: Test Rust backend
         run: cargo test --manifest-path src-tauri/Cargo.toml
-      - name: Build frontend
-        run: npm run build
+      - name: Fetch official llama.cpp runtime
+        run: npm run runtime:prepare
+      - name: Build Windows installers
+        run: npm run tauri build
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyAILocalModel-Windows
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
