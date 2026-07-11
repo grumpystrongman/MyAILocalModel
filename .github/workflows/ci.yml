@@ -20,7 +20,12 @@ jobs:
       - name: Typecheck frontend
         run: npm run typecheck
       - name: Test Rust backend
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        shell: pwsh
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml *> cargo-test.log
+          $exitCode = $LASTEXITCODE
+          Get-Content cargo-test.log -Tail 180
+          if ($exitCode -ne 0) { exit $exitCode }
       - name: Fetch official llama.cpp runtime
         run: npm run runtime:prepare
       - name: Build Windows installers
