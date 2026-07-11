@@ -1,7 +1,7 @@
 [package]
 name = "my_ai_local_model"
-version = "0.1.0"
-description = "Local AI model advisor and Hugging Face downloader"
+version = "0.2.0"
+description = "Local AI model advisor, bundled llama.cpp runtime, and private chat"
 authors = ["Jeff Barnes"]
 edition = "2021"
 
@@ -20,9 +20,8 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "time"] }
 sysinfo = "0.33"
-dirs = "5"
 regex = "1"
 futures-util = "0.3"
 
