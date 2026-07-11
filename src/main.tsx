@@ -1,176 +1,98 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import './styles.css';
 
-type HardwareProfile = {
-  os_name: string;
-  arch: string;
-  cpu_cores: number;
-  total_ram_gb: number;
-  available_ram_gb: number;
-  disk_free_gb: number;
-  gpu_name?: string | null;
-  vram_gb?: number | null;
-  notes: string[];
-};
-
-type Recommendation = {
-  repo_id: string;
-  filename: string;
-  quantization?: string | null;
-  parameter_billions?: number | null;
-  size_gb?: number | null;
-  score: number;
-  fit_score: number;
-  quality_score: number;
-  speed_score: number;
-  safety_margin_score: number;
-  popularity_score: number;
-  usability_score: number;
-  estimated_memory_gb: number;
-  expected_runtime: string;
-  runtime_recommendations: string[];
-  decision: string;
-  reasons: string[];
-  cautions: string[];
-  download_url: string;
-};
-
-type DownloadResult = { path: string; bytes: number };
+type Hardware = { os_name:string; arch:string; cpu_cores:number; total_ram_gb:number; available_ram_gb:number; disk_free_gb:number; gpu_name?:string|null; vram_gb?:number|null; notes:string[] };
+type Rec = { repo_id:string; filename:string; quantization?:string|null; parameter_billions?:number|null; size_gb?:number|null; score:number; fit_score:number; quality_score:number; speed_score:number; safety_margin_score:number; estimated_memory_gb:number; gpu_layers:number; context_size:number; decision:string; reasons:string[]; cautions:string[]; download_url:string };
+type RuntimeStatus = { state:string; model_path?:string|null; endpoint:string; detail:string; pid?:number|null; gpu_layers?:number|null; context_size?:number|null };
+type ChatMessage = { role:'system'|'user'|'assistant'; content:string };
+type DownloadProgress = { downloaded:number; total?:number|null; percent?:number|null };
 
 const tasks = [
-  { id: 'general', label: 'General chat', hint: 'Balanced model for normal questions and summaries.' },
-  { id: 'coding', label: 'Coding', hint: 'Prioritizes coder/instruct models.' },
-  { id: 'writing', label: 'Novel writing', hint: 'Prioritizes expressive instruction models.' },
-  { id: 'research', label: 'Research', hint: 'Prioritizes reasoning/context quality.' },
-  { id: 'small-business', label: 'Small business private AI', hint: 'Prioritizes easy, safe, local-first models.' },
+  ['general','General chat'],['coding','Coding'],['writing','Writing'],['research','Research'],['small-business','Private business AI']
 ];
 
-function pct(value: number) {
-  return `${Math.round(value * 100)}%`;
-}
+function App(){
+  const [step,setStep]=useState(1);
+  const [hardware,setHardware]=useState<Hardware|null>(null);
+  const [task,setTask]=useState('general');
+  const [preference,setPreference]=useState(.5);
+  const [recs,setRecs]=useState<Rec[]>([]);
+  const [selected,setSelected]=useState<Rec|null>(null);
+  const [modelPath,setModelPath]=useState<string|null>(null);
+  const [runtime,setRuntime]=useState<RuntimeStatus|null>(null);
+  const [status,setStatus]=useState('Preparing setup...');
+  const [progress,setProgress]=useState<number|null>(null);
+  const [messages,setMessages]=useState<ChatMessage[]>([{role:'system',content:'You are a helpful private assistant running entirely on this computer.'}]);
+  const [input,setInput]=useState('');
+  const [busy,setBusy]=useState(false);
 
-function explainQuant(q?: string | null) {
-  if (!q) return 'Unknown quantization: the app cannot confidently estimate the quality/memory tradeoff from this filename.';
-  if (q.startsWith('Q4')) return `${q} is usually the practical sweet spot: strong memory savings, good speed, and acceptable quality loss for most local use.`;
-  if (q.startsWith('Q5') || q.startsWith('Q6')) return `${q} keeps more quality than Q4 but uses more memory. Good when your machine has headroom.`;
-  if (q.startsWith('Q8')) return `${q} is higher fidelity but heavy. Choose it only when RAM/VRAM is comfortable and speed matters less.`;
-  if (q.startsWith('Q2') || q.startsWith('Q3')) return `${q} is very small and fast, but quality can degrade. Useful for constrained machines.`;
-  return `${q} has a model-specific tradeoff. Review memory and fit before downloading.`;
-}
+  useEffect(()=>{
+    const boot=async()=>{
+      const hw=await invoke<Hardware>('scan_hardware'); setHardware(hw); setStatus('Hardware scan complete.');
+      const rs=await invoke<RuntimeStatus>('runtime_status'); setRuntime(rs);
+    };
+    boot().catch(e=>setStatus(String(e)));
+    const unlisten=listen<DownloadProgress>('download-progress',e=>setProgress(e.payload.percent??null));
+    return ()=>{unlisten.then(fn=>fn());};
+  },[]);
 
-function App() {
-  const [hardware, setHardware] = useState<HardwareProfile | null>(null);
-  const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
-  const [task, setTask] = useState('general');
-  const [preference, setPreference] = useState(0.5);
-  const [status, setStatus] = useState('Ready');
-  const [query, setQuery] = useState('GGUF instruct');
-  const [downloading, setDownloading] = useState<string | null>(null);
+  const top=selected??recs[0]??null;
+  const pct=(n:number)=>`${Math.round(n*100)}%`;
 
-  async function scan() {
-    setStatus('Scanning hardware...');
-    const result = await invoke<HardwareProfile>('scan_hardware');
-    setHardware(result);
-    setStatus('Hardware scan complete.');
+  async function findModels(){
+    setBusy(true); setStatus('Searching Hugging Face and comparing models...');
+    try{
+      const result=await invoke<Rec[]>('recommend_models',{request:{task,query:'GGUF instruct',speed_quality_preference:preference,limit:10}});
+      setRecs(result); setSelected(result[0]??null); setStep(3); setStatus('Recommendation ready.');
+    }finally{setBusy(false);}
   }
 
-  async function recommend() {
-    setStatus('Searching Hugging Face and scoring models...');
-    const result = await invoke<Recommendation[]>('recommend_models', {
-      request: { task, query, speed_quality_preference: preference, limit: 12 },
-    });
-    setRecommendations(result);
-    setStatus(`Found ${result.length} recommendations.`);
+  async function installAndStart(){
+    if(!top)return;
+    setBusy(true); setProgress(0); setStatus(`Downloading ${top.filename}...`);
+    try{
+      const result=await invoke<{path:string;bytes:number}>('download_model',{request:{repo_id:top.repo_id,filename:top.filename,url:top.download_url}});
+      setModelPath(result.path); setStatus('Model downloaded. Starting the private runtime...');
+      const rs=await invoke<RuntimeStatus>('start_runtime',{request:{model_path:result.path,gpu_layers:top.gpu_layers,context_size:top.context_size,threads:null}});
+      setRuntime(rs); setStep(4); setStatus(rs.detail);
+    }finally{setBusy(false); setProgress(null);}
   }
 
-  async function download(rec: Recommendation) {
-    setDownloading(`${rec.repo_id}/${rec.filename}`);
-    setStatus(`Downloading ${rec.filename}...`);
-    try {
-      const result = await invoke<DownloadResult>('download_model', {
-        request: { repo_id: rec.repo_id, filename: rec.filename, url: rec.download_url },
-      });
-      setStatus(`Downloaded ${Math.round(result.bytes / 1024 / 1024)} MB to ${result.path}`);
-    } finally {
-      setDownloading(null);
-    }
+  async function send(){
+    const text=input.trim(); if(!text||busy)return;
+    const next=[...messages,{role:'user' as const,content:text}]; setMessages(next); setInput(''); setBusy(true); setStatus('Thinking locally...');
+    try{
+      const response=await invoke<{content:string}>('chat',{request:{messages:next,temperature:.7,max_tokens:768}});
+      setMessages([...next,{role:'assistant',content:response.content}]); setStatus('Ready.');
+    }catch(e){setStatus(String(e));}
+    finally{setBusy(false);}
   }
 
-  useEffect(() => { scan().catch((err) => setStatus(String(err))); }, []);
-
-  const top = recommendations[0];
-  const selectedTask = useMemo(() => tasks.find((t) => t.id === task), [task]);
+  async function stop(){const rs=await invoke<RuntimeStatus>('stop_runtime');setRuntime(rs);setStatus(rs.detail);}
+  async function restart(){setBusy(true);try{const rs=await invoke<RuntimeStatus>('restart_runtime');setRuntime(rs);setStatus(rs.detail);}finally{setBusy(false);}}
 
   return <main>
-    <section className="hero">
-      <div>
-        <p className="eyebrow">Private local AI, without terminal pain</p>
-        <h1>MyAILocalModel</h1>
-        <p className="lede">Scan your machine, pull real Hugging Face candidates, and explain why one local model is the right choice over another.</p>
-      </div>
-      <button onClick={() => scan().catch((err) => setStatus(String(err)))}>Rescan hardware</button>
-    </section>
+    <header className="topbar"><div><span className="brand">MyAILocalModel</span><span className="privacy">Private by default</span></div><span className={`runtime ${runtime?.state??'stopped'}`}>{runtime?.state??'stopped'}</span></header>
 
-    <section className="grid two">
-      <div className="card">
-        <h2>Hardware intelligence</h2>
-        {hardware ? <div className="specs">
-          <span>OS</span><strong>{hardware.os_name} {hardware.arch}</strong>
-          <span>CPU</span><strong>{hardware.cpu_cores} cores</strong>
-          <span>RAM</span><strong>{hardware.available_ram_gb.toFixed(1)} GB free / {hardware.total_ram_gb.toFixed(1)} GB total</strong>
-          <span>Disk</span><strong>{hardware.disk_free_gb.toFixed(1)} GB free</strong>
-          <span>GPU</span><strong>{hardware.gpu_name || 'Not detected'}</strong>
-          <span>VRAM</span><strong>{hardware.vram_gb ? `${hardware.vram_gb.toFixed(1)} GB` : 'Unknown'}</strong>
-        </div> : <p>Scanning...</p>}
-        {hardware?.notes.map((note) => <p className="note" key={note}>{note}</p>)}
-      </div>
+    {step<4 && <section className="wizard">
+      <div className="steps"><span className={step>=1?'active':''}>1 Scan</span><span className={step>=2?'active':''}>2 Purpose</span><span className={step>=3?'active':''}>3 Choose</span><span>4 Chat</span></div>
 
-      <div className="card controls">
-        <h2>Tell me what you're doing</h2>
-        <div className="task-list">{tasks.map((t) => <button className={task === t.id ? 'active' : ''} onClick={() => setTask(t.id)} key={t.id}>{t.label}</button>)}</div>
-        <p className="note">{selectedTask?.hint}</p>
-        <label>Hugging Face query<input value={query} onChange={(e) => setQuery(e.target.value)} /></label>
-        <label>Speed ↔ Quality <input type="range" min="0" max="1" step="0.05" value={preference} onChange={(e) => setPreference(Number(e.target.value))} /></label>
-        <div className="slider-labels"><span>Faster</span><span>Balanced</span><span>Higher quality</span></div>
-        <button className="primary" onClick={() => recommend().catch((err) => setStatus(String(err)))}>Find my best local models</button>
-      </div>
-    </section>
+      {step===1&&<div className="panel hero"><p className="eyebrow">Welcome</p><h1>Let’s find the best private AI for this computer.</h1><p>No terminal. No configuration files. Your prompts stay local.</p>{hardware&&<div className="spec-grid"><b>Memory</b><span>{hardware.available_ram_gb.toFixed(1)} GB available of {hardware.total_ram_gb.toFixed(1)} GB</span><b>Processor</b><span>{hardware.cpu_cores} cores</span><b>Graphics</b><span>{hardware.gpu_name||'CPU mode'} {hardware.vram_gb?`· ${hardware.vram_gb.toFixed(1)} GB VRAM`:''}</span><b>Storage</b><span>{hardware.disk_free_gb.toFixed(1)} GB free</span></div>}<button className="primary" onClick={()=>setStep(2)} disabled={!hardware}>Continue</button></div>}
 
-    <section className="status">{status}</section>
+      {step===2&&<div className="panel"><p className="eyebrow">What will you use it for?</p><h2>Choose the work that matters most.</h2><div className="choice-grid">{tasks.map(([id,label])=><button key={id} className={task===id?'choice selected':'choice'} onClick={()=>setTask(id)}>{label}</button>)}</div><label className="slider">Faster responses <input type="range" min="0" max="1" step=".05" value={preference} onChange={e=>setPreference(Number(e.target.value))}/> Better answers</label><button className="primary" disabled={busy} onClick={()=>findModels().catch(e=>setStatus(String(e)))}>{busy?'Comparing models...':'Find my best model'}</button></div>}
 
-    {top && <section className="card recommendation">
-      <p className="eyebrow">Recommended</p>
-      <h2>{top.repo_id}</h2>
-      <p className="file">{top.filename}</p>
-      <p className="decision">{top.decision}</p>
-      <div className="bars">
-        <label>Fit <span>{pct(top.fit_score)}</span><meter min="0" max="1" value={top.fit_score}/></label>
-        <label>Quality <span>{pct(top.quality_score)}</span><meter min="0" max="1" value={top.quality_score}/></label>
-        <label>Speed <span>{pct(top.speed_score)}</span><meter min="0" max="1" value={top.speed_score}/></label>
-        <label>Safety margin <span>{pct(top.safety_margin_score)}</span><meter min="0" max="1" value={top.safety_margin_score}/></label>
-      </div>
-      <div className="grid two compact">
-        <div><h3>Why this model</h3>{top.reasons.map((r) => <p key={r}>✓ {r}</p>)}</div>
-        <div><h3>Cautions</h3>{top.cautions.length ? top.cautions.map((c) => <p key={c}>⚠ {c}</p>) : <p>No major cautions for this hardware profile.</p>}</div>
-      </div>
-      <p><strong>Quantization:</strong> {explainQuant(top.quantization)}</p>
-      <p><strong>Runtime:</strong> {top.expected_runtime}. Also consider {top.runtime_recommendations.join(', ')}.</p>
-      <button className="primary" disabled={!!downloading} onClick={() => download(top).catch((err) => setStatus(String(err)))}>{downloading ? 'Downloading...' : 'Download recommended model'}</button>
+      {step===3&&top&&<div className="panel"><p className="eyebrow">Best match for this computer</p><h2>{top.repo_id}</h2><p className="filename">{top.filename}</p><p className="decision">{top.decision}</p><div className="score-grid"><Score label="Fit" value={top.fit_score}/><Score label="Quality" value={top.quality_score}/><Score label="Speed" value={top.speed_score}/><Score label="Headroom" value={top.safety_margin_score}/></div><div className="why"><div><h3>Why it was chosen</h3>{top.reasons.map(r=><p key={r}>✓ {r}</p>)}</div><div><h3>What to know</h3>{top.cautions.length?top.cautions.map(c=><p key={c}>⚠ {c}</p>):<p>No major cautions.</p>}</div></div><p><b>Automatic settings:</b> {top.gpu_layers===999?'full GPU offload':`${top.gpu_layers} GPU layers`}, {top.context_size.toLocaleString()} token context.</p><div className="model-list">{recs.slice(0,5).map(r=><button key={r.filename} onClick={()=>setSelected(r)} className={top.filename===r.filename?'model-option selected':'model-option'}><span>{r.repo_id}</span><small>{r.quantization||'GGUF'} · {r.estimated_memory_gb.toFixed(1)} GB estimated</small></button>)}</div>{progress!==null&&<div className="download"><progress max="1" value={progress}/><span>{Math.round(progress*100)}%</span></div>}<button className="primary" disabled={busy} onClick={()=>installAndStart().catch(e=>setStatus(String(e)))}>{busy?'Installing and loading...':'Install model and start private AI'}</button></div>}
     </section>}
 
-    <section className="grid cards">
-      {recommendations.slice(1).map((rec) => <article className="card model" key={`${rec.repo_id}/${rec.filename}`}>
-        <h3>{rec.repo_id}</h3>
-        <p className="file">{rec.filename}</p>
-        <p>{rec.decision}</p>
-        <p>Score {pct(rec.score)} · Fit {pct(rec.fit_score)} · Quality {pct(rec.quality_score)} · Speed {pct(rec.speed_score)}</p>
-        <p>Memory estimate: {rec.estimated_memory_gb.toFixed(1)} GB · Quant: {rec.quantization || 'unknown'} · Params: {rec.parameter_billions || 'unknown'}B</p>
-        <button disabled={!!downloading} onClick={() => download(rec).catch((err) => setStatus(String(err)))}>Download</button>
-      </article>)}
-    </section>
+    {step===4&&<section className="chat-shell"><aside><h2>Local AI</h2><p>{top?.repo_id}</p><div className="runtime-card"><b>{runtime?.state==='ready'?'Ready':'Not ready'}</b><span>{runtime?.detail}</span><small>Context: {runtime?.context_size?.toLocaleString()??'—'} · GPU layers: {runtime?.gpu_layers??'—'}</small></div><button onClick={()=>restart().catch(e=>setStatus(String(e)))} disabled={busy}>Restart model</button><button onClick={()=>stop().catch(e=>setStatus(String(e)))}>Stop model</button><button onClick={()=>setStep(2)}>Choose another model</button></aside><section className="chat"><div className="messages">{messages.filter(m=>m.role!=='system').map((m,i)=><div key={i} className={`message ${m.role}`}><b>{m.role==='user'?'You':'Local AI'}</b><p>{m.content}</p></div>)}{messages.length===1&&<div className="empty"><h2>Your private AI is ready.</h2><p>Ask a question. The answer is generated on this computer.</p></div>}</div><div className="composer"><textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}} placeholder="Message your local model..."/><button className="primary" onClick={send} disabled={busy||runtime?.state!=='ready'}>{busy?'Working...':'Send'}</button></div></section></section>}
+
+    <footer className="statusbar"><span>{status}</span><span>Local endpoint: {runtime?.endpoint??'not started'}</span></footer>
   </main>;
 }
 
-createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
+function Score({label,value}:{label:string;value:number}){return <div className="score"><span>{label}</span><b>{Math.round(value*100)}%</b><meter min="0" max="1" value={value}/></div>}
+
+createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);
